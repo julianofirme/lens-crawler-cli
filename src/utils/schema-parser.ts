@@ -1,7 +1,5 @@
 // src/utils/schema-parser.ts
 
-import { JsonOutputFunctionsParser } from "@langchain/core/output_parsers/openai_functions";
-import { PromptTemplate } from "@langchain/core/prompts";
 import { ChatOllama } from '@langchain/ollama'
 
 interface SchemaField {
@@ -17,39 +15,53 @@ export async function parseSchema(naturalLanguage: string): Promise<SchemaField[
     model: 'mistral',
   })
 
-  const prompt = PromptTemplate.fromTemplate(`
-    Convert the following natural language description of data fields into a structured schema.
-    For each field, determine:
-    1. A descriptive camelCase field name
-    2. The most likely CSS selector to find this data
-    3. The type of data (text, attribute, href, src)
-    4. If type is attribute, specify which attribute to extract
+  const systemPrompt = `You are a web scraping expert. Your task is to convert natural language descriptions into web scraping schemas.
+Always respond with a valid JSON array containing objects with these fields:
+- fieldName: camelCase identifier
+- selector: CSS selector
+- type: one of 'text', 'href', 'src', or 'attribute'
+- attributeName: (optional) only if type is 'attribute'`
 
-    Description: {input}
+  const userPrompt = `Convert this description into a scraping schema: ${naturalLanguage}
+Output format must be a JSON array like this example:
+[
+  {
+    "fieldName": "articleTitle",
+    "selector": "h1.title",
+    "type": "text"
+  }
+]`
 
-    Output a JSON array where each item has: fieldName, selector, type, and optionally attributeName.
-    Example output:
-    [
-      {
-        "fieldName": "articleTitle",
-        "selector": "h1.title",
-        "type": "text"
-      },
-      {
-        "fieldName": "authorProfileUrl",
-        "selector": ".author-link",
-        "type": "href"
+  try {
+    const response = await model.invoke([
+      { content: systemPrompt, role: 'system' },
+      { content: userPrompt, role: 'user' }
+    ])
+
+    const match = response.content.toString().match(/\[[\s\S]*\]/)
+    if (!match) {
+      throw new Error('No valid JSON array found in response')
+    }
+
+    const schema = JSON.parse(match[0])
+
+    if (!Array.isArray(schema)) {
+      throw new TypeError('Schema must be an array')
+    }
+
+    for (const [index, field] of schema.entries()) {
+      if (!field.fieldName || !field.selector || !field.type) {
+        throw new Error(`Invalid field at index ${index}`)
       }
-    ]
-  `)
 
-  const parser = new JsonOutputFunctionsParser()
-  
-  const chain = prompt.pipe(model).pipe(parser)
-  
-  const result = await chain.invoke({
-    input: naturalLanguage,
-  })
+      if (!['attribute', 'href', 'src', 'text'].includes(field.type)) {
+        throw new Error(`Invalid type "${field.type}" at index ${index}`)
+      }
+    }
 
-  return result as SchemaField[]
+    return schema
+  } catch (error) {
+    console.error('Schema parsing error:', error)
+    throw new Error(`Failed to parse schema: ${(error as Error).message}`)
+  }
 }
